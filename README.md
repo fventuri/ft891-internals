@@ -61,6 +61,24 @@ known-good firmware backup available before flashing.
 python3 ft891_flash.py /dev/ttyUSB0 AH065_M_V0110.bin
 ```
 
+### `CAT_codes.md`
+
+Full reference table for all 121 CAT commands in the FT-891 firmware dispatch table.
+
+Each entry records: command index, whether it appears in the official CAT reference manual, firmware
+status (active or dead stub), Set/Read/Auto-Information flags, the actual wire format as confirmed by
+disassembly, and notes on internal implementation.
+
+Key findings documented here that are not in the official manual:
+- 7 active undocumented commands (PE, SP, VE, JP, ZZ, E0, E8) with full format descriptions
+- 25 dead stubs (registered in the dispatch table but always return error)
+- Hidden extended forms: `MT P1[38];` (combined channel-write-with-name, undocumented) and
+  `ID 0891;` (returns firmware version instead of model code)
+- Format discrepancies: IS uses 7-param wire format vs PDF's 4; several commands have a mandatory
+  leading `'0'` VFO-selector byte omitted from PDF parameter counts (BC, CN, IS)
+- EX menu internal structure (18 sections, 159 parameters, ROM tables at 0x100DA/0x100EC)
+- FA uses 9-digit frequency format (not 11 as the PDF states)
+
 ### `MAIN_FIRMWARE_ANALYSIS.md`
 
 Firmware analysis of the main board H8S/2655 firmware (`AH065_M_V0110.bin`).

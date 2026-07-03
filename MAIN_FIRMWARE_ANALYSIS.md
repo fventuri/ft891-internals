@@ -172,30 +172,309 @@ This is the **CAT-like ASCII protocol** used for firmware programming via a PC t
 
 ### CAT Interface (Computer Aided Transceiver)
 
-**Command table** @ 0x19598: 122 two-letter command codes, packed as a single string:
+**Command table** @ 0x19598: 121 two-letter command codes, packed as a single string:
 ```
 AB AC AG AI AM AN BA BC BD BG BI BM BP BS BU BY CF CH CN CO CS CT
-DA DN DP DS DT ED EK EM EN EU EX FA FB FI FK FO FR FS FT GT HR HI
-IF IS KC KM KP KR KS KY LK LM MA MB MC MD MG MK ML MR MS MT MW MX
-NA NB NL NR OI OS PA PB PC PE PL PR PS QI QR QS RA RC RD RF RG RI
-RL RM RO RS RT RU SC SD SF SH SM SQ ST SV TS TX UL UP VD VF VG VM
-VS VX XT ZI SP VE JP ZZ E0 E8
+DA DN DP DS DT ED EK EM EN EU EX FA FB FI FK FO FR FS FT GT HR HW
+ID IF IS KC KM KP KR KS KY LK LM MA MB MC MD MG MK ML MR MS MT MW
+MX NA NB NL NR OI OS PA PB PC PE PL PR PS QI QR QS RA RC RD RF RG
+RI RL RM RO RS RT RU SC SD SF SH SM SQ ST SV TS TX UL UP VD VF VG
+VM VS VX XT ZI SP VE JP ZZ E0 E8
 ```
+*(Note: the original analysis had "HI" at position 43 — the binary has **HW**; and **ID** at position 44 was previously recorded as missing but is present.)*
 
-**Dispatch table** @ 0x19540–0x19594: Function pointers to individual command handlers:
+**Dispatch mechanism**: The CAT handler at 0x192A0 scans the command string to find the matching 2-char code, saves the index to R0L, then calls the `computed_goto` dispatcher:
 ```
-0x19540 → 0x1CDB6   (handler AB?)
-0x19544 → 0x1CE02   ...
-0x19548 → 0x1CE9C
-0x1954C → 0x1CEE2
-...
-0x19594 → 0x1D912   (last handler)
+193AE:  JSR @0x2A6AA      ; computed_goto
+193B2:  .word 0x0078      ; N = 120 (indices 0–120, i.e. 121 handlers)
+193B4:  .long 0x19902     ; handler[0]  = AB
+193B8:  .long 0x1990E     ; handler[1]  = AC
+        ...
+19594:  .long 0x1D912     ; handler[120] = E8
+```
+Full 121-entry pointer table: **0x193B4–0x19597** (484 bytes, 4 bytes per entry).  
+*(The range 0x19540–0x19597 that the earlier analysis called the "dispatch table" is actually handlers 99–120 = SM through E8, the tail of this inline table.)*
+
+Selected handler addresses:
+```
+[  0] AB → 0x19902    [ 33] FA → 0x1A5FE    [ 67] NA → 0x1BAA4
+[ 44] ID → 0x1A8A2    [ 58] MD → 0x1B228    [ 99] SM → 0x1CDB6
+[ 99] SM → 0x1CDB6    [100] SQ → 0x1CE02    [113] XT → 0x1D204
+[115] SP → 0x1D214    [116] VE → 0x1D642    [117] JP → 0x19728
+[118] ZZ → 0x1968A    [119] E0 → 0x1D830    [120] E8 → 0x1D912
 ```
 
 **TX path**: TXI3 ISR (vec 106 @ 0x2C97C) with dual-buffer state machine  
 **RX path**: Likely SCI3 receive (not explicitly in vector table → may poll in main loop)
 
 **CAT baud rates** (from menu strings): 4800 / 9600 / 19200 / 38400 bps
+
+**Firmware version string** @ 0x2F11A: `V01-102021-09-27-01`  
+(format: `V<major>-<minor><date YYYY-MM-DD>-<rev>`)  
+Read by the undocumented VE and extended-ID commands.
+
+#### Undocumented CAT Commands
+
+Of the 121 command handlers, 32 are not in the official CAT reference manual: 7 are active (PE, SP, VE, JP, ZZ, E0, E8) and 25 are dead stubs.
+
+**Dead stubs** — handler is a single `BRA 0x19358` (error/no-match exit), confirmed in binary:
+
+| Cmd | Index | Handler | Cmd | Index | Handler |
+|-----|-------|---------|-----|-------|---------|
+| AN  |   5   | 0x19AB2 | MB  |  56   | 0x1B024 |
+| BG  |   9   | 0x19B52 | MK  |  60   | 0x1B4D0 |
+| BM  |  11   | 0x19BFA | RF  |  86   | 0x1C686 |
+| DP  |  24   | 0x1A49A | RO  |  91   | 0x1C8C2 |
+| DS  |  25   | 0x1A49E | RT  |  93   | 0x1C8EE |
+| DT  |  26   | 0x1A4A2 | SF  |  97   | 0x1CAC8 |
+| EM  |  29   | 0x1A53E | VF  | 108   | 0x1D0C8 |
+| EN  |  30   | 0x1A542 | VS  | 111   | 0x1D19C |
+| FI  |  35   | 0x1A770 | XT  | 113   | 0x1D204 |
+| FK  |  36   | 0x1A774 |     |       |         |
+| FO  |  37   | 0x1A778 |     |       |         |
+| FR  |  38   | 0x1A77C |     |       |         |
+| FT  |  40   | 0x1A7D8 |     |       |         |
+| HR  |  42   | 0x1A89A |     |       |         |
+| HW  |  43   | 0x1A89E |     |       |         |
+| KC  |  47   | 0x1AC1C |     |       |         |
+
+**Active undocumented commands:**
+
+**`PE` (index 76, handler 0x1BF1E, 1178 bytes) — Parametric EQ band coefficient access**  
+Format — Read:  `PE <CA><CB><CC>;` (3 param bytes)  
+Format — Write: `PE <CA><CB><CC><D4><D5><D6>;` (6 param bytes)  
+Read answer:    `PE <CA><CB><CC><sign><v1><v2>;` (9 bytes total; sign = `'0'`/`'+'`/`'-'`)
+
+Address fields:
+- **CA** (`'0'` or `'2'`): EQ channel — selects between two coefficient banks (likely TX EQ vs. P-EQ Mic)
+- **CB** (`'0'`/`'1'`/`'2'`): EQ band (band 1 / 2 / 3)
+- **CC** (`'0'`/`'1'`/`'2'`): parameter type within band:
+  - `'0'` = center frequency index (unsigned; band-1: 0–7, band-2: 0–9, band-3: 0–18 — option counts match EX menus 1501/1504/1507 and 1510/1513/1516)
+  - `'1'` = level/gain (signed byte, −20 to +10 dB — matches EX menus 1502/1505/1508 and 1511/1514/1517)
+  - `'2'` = bandwidth/Q factor (unsigned, 1–10 — matches EX menus 1503/1506/1509 and 1512/1515/1518)
+
+Frequency (CC=`'0'`) and bandwidth (CC=`'2'`) for the same band share one byte — freq in the lower nibble, bwth in the upper nibble. Level (CC=`'1'`) is a separate signed byte.
+
+RAM coefficient table (CA=`'0'` bank; CA=`'2'` bank is +8 bytes offset):
+
+| Band (CB) | Freq / Bwth byte | Level byte |
+|-----------|-----------------|------------|
+| 0 (band 1) | 0xFF8DB3 | 0xFF8DB8 |
+| 1 (band 2) | 0xFF8DB4 | 0xFF8DB9 |
+| 2 (band 3) | freq: 0xFF8DC3 (lower 5 bits), bwth: 0xFF8DB5 (upper nibble) | 0xFF8DBA |
+
+Write path calls `jsr @0x37E2` (SPI driver, same as SP) immediately after updating RAM, pushing the coefficient to hardware. SPI index constants 0x233–0x244 identify the specific hardware register.  
+Not in the official CAT reference manual. The coefficient RAM at 0xFF8DB3–0xFF8DC4 is a subset of the bulk calibration dataset exported by E0 and E8.
+
+**`SP` (index 115, handler 0x1D214) — Service Parameter / SPI access**  
+Multi-sub-command family, dispatched on the first parameter byte:
+- `SPW<addr16><data16><cksum>;` (6 params) — direct SPI write; two bytes sent via `jsr @0x37E2` (the main SPI driver)
+- `SPR<addr16><cksum>;` (4 params) — direct SPI read via `jsr @0x3762`; returns 2 bytes + checksum
+- `SPAWN<idx16><byte>;` / `SPAWN<idx16>;` — spectrum scope noise-floor calibration table at 0xFF8BA2; 302-entry table indexed 0x000A–0x0137
+- `SPMTR<data>;` — factory TR-switch test; calls 0x2B5DE; 12-byte (0xC) reply
+- `SPN<val16>;` (write) / `SPN;` (read) — noise-reduction register 0xFF8D14 (range 0–0xE2); applied via 0xD5E4
+- `SPAWE/SPAWD/SPAWCL;` — factory write sequences via 0x4F78 / 0x16C4
+
+**`VE` (index 116, handler 0x1D642) — Version query (requires password)**  
+Format: `VE RAH065H;`  
+Response: `R M<main_ver> DSP<dsp_ver> LCD<lcd_ver>;`  
+Reads main firmware version from 0x2F11A (`V01-10` = V01 minor-10); DSP and LCD version digits from 0xFF2004–0xFF2007 (hardware registers).
+
+**`JP` (index 117, handler 0x19728) — GPIO port access (requires model code)**  
+Format: `JP0891;` (read, returns 15 bytes)  
+&emsp;&emsp;&emsp;&emsp;`JP0891<8 hex digits>;` (write, 12 params)  
+Reads/writes output port registers 0xFF200A–0xFF200B (band decoder / GPIO lines).  
+Write path validates a 1's-complement XOR checksum (nibble-pair1 XOR nibble-pair2 == 0xFF) before applying; calls 0x2502 to activate. "0891" is the FT-891 model number as verification.
+
+**`ZZ` (index 118, handler 0x1968A) — Factory mode entry**  
+Format: `ZZ PE0891<nn>;` (total 8 param bytes, where `nn` = 2 hex digit parameter)  
+Validates password "PE0891"; decodes `nn` and range-checks (0–7); writes to 0xFF2001 (Port 1 Data Register); then `JMP 0x726` — unconditional jump into factory boot code. This is the master factory-mode entry command.
+
+**`E0` (index 119, handler 0x1D830) — Calibration data read**  
+No parameters. Builds an encoded response (~0xE3 bytes) from the calibration table at 0xFF8D66: 20 groups × 10 entries, each byte XOR-encoded with a key derived from the encoder counter (0xFF23CB) plus constants 0x08/0xF6. Returns a checksum-verified frame.
+
+**`E8` (index 120, handler 0x1D912) — Bulk calibration dump**  
+No parameters. Response size: 0x294A bytes (~10.6 KB) — the full calibration/alignment dataset. Built from 0xFF2ECC using the same encoding scheme as E0, then streamed via the standard CAT TX path.
+
+#### Extended `ID` command (confirmed at index 44)
+
+Standard read `ID;` → `ID0650;` (model identification = 0650 = FT-891, as per the official spec).
+
+Extended form: `ID0891;` (4 param digits = BCD model number 0891 → decimal 891 = 0x37B)  
+Validates the BCD model number via `jsr @0x27C62`; if correct, returns 4-byte firmware version from 0x2F11B–0x2F11F (e.g. `ID0110;` for main version "01-10").
+
+#### EX handler (index 32, handler 0x1A558, ~166 bytes)
+
+The EX handler decodes a 4-digit ASCII menu number and converts it to a global parameter index (0–158) via two ROM tables, then dispatches to read or write sub-functions.
+
+**Decode pipeline:**
+1. Validate 4 param bytes as ASCII hex digits (`jsr @0x19716` × 4)
+2. Pack into BCD pairs: R0H = BCD(digits 1,2), R0L = BCD(digits 3,4)
+3. Call `jsr @0x27C5E` (R1H=1, 1-byte decode) twice to extract:
+   - Item within section (last 2 digits, 1-indexed)
+   - Section number (first 2 digits, 1-indexed, range 1–18)
+4. Range-check both against ROM tables
+
+**Two ROM tables** (18 bytes each, one entry per section):
+
+| Address | Content |
+|---------|---------|
+| 0x100DA | `max_items[section]` — item count for each section |
+| 0x100EC | `base_offset[section]` — cumulative global index for section start |
+
+Global parameter index = `base_offset[section-1] + (item-1)` (0-indexed, 0–158 total)
+
+**Section map** (from ROM tables):
+| Section | Items | EX range | Likely topic |
+|---------|-------|----------|--------------|
+| 01 | 3 | 0101–0103 | AGC delays |
+| 02 | 7 | 0201–0207 | LCD / backlight |
+| 03 | 2 | 0301–0302 | — |
+| 04 | 11 | 0401–0411 | Mode / filter |
+| 05 | 20 | 0501–0520 | CW/RTTY/CAT (0506–0508 = CAT baud/TOT/RTS) |
+| 06 | 7 | 0601–0607 | TX / MIC |
+| 07 | 13 | 0701–0713 | SSB |
+| 08 | 12 | 0801–0812 | IF / filter |
+| 09 | 6 | 0901–0906 | CW keyer |
+| 10 | 11 | 1001–1011 | DVS / messages |
+| 11 | 9 | 1101–1109 | Scan |
+| 12 | 4 | 1201–1204 | ARS / general |
+| 13 | 2 | 1301–1302 | SCP enable |
+| 14 | 7 | 1401–1407 | SCP / dial steps |
+| 15 | 18 | 1501–1518 | **EQ + P-EQ** (global idx 114–131) |
+| 16 | 23 | 1601–1623 | TX power limits |
+| 17 | 1 | 1701–1701 | APO |
+| 18 | 3 | 1801–1803 | FW versions (read-only) |
+
+**Dispatch** (R3L = number of param bytes before ';'):
+- `EX NNNN;` (R3L=4) → read → `jsr @0x17036` with global index in R0L
+- `EX NNNN VVV...;` (R3L>4) → write → `jsr @0x15A84` (value decode) + `jsr @0x2576` (apply), then `bset #0x7, @0xFF2012` and `bset #0x4, @0xFF202D` (same update flags as PE)
+
+**EX / PE cross-confirmation:**  
+Section 15 has exactly 18 items (global idx 114–131), matching the 18 PE parameter combinations (CA∈{`'0'`,`'2'`} × CB∈{`'0'`–`'2'`} × CC∈{`'0'`–`'2'`}):
+- EX 1501–1509 (global 114–122) = SSB TX EQ bands 1–3 (freq/level/bwth) → **PE CA=`'0'`**
+- EX 1510–1518 (global 123–131) = P-EQ Mic bands 1–3 (freq/level/bwth) → **PE CA=`'2'`**
+
+Both PE and EX set the same flags (0xFF2012.7, 0xFF202D.4) when writing EQ parameters, confirming they access the same hardware path. `jsr @0x17036` (EX read) should read from the same RAM locations as PE read (0xFF8DB3–0xFF8DC4); not yet confirmed by tracing 0x17036 internals.
+
+---
+
+#### FA handler (index 33, handler 0x1A5FE, ~342 bytes)
+
+**Firmware vs PDF discrepancy: FA uses 9-digit frequency, not 11**
+
+The firmware validates and processes exactly 9 ASCII decimal digit parameters. The PDF states 11 digits — this may reflect a generic Yaesu format for higher-frequency models; the FT-891 implementation uses 9 (sufficient for 0–999,999,999 Hz).
+
+**Write path** (`FA P1[9];`, R3L=9):
+1. `jsr @0x3A74` — VFO mode setup (sets 0xFF2012.3, selects I/O register block 0xFF20CA or 0xFF2124)
+2. `jsr @0x2C2C` — (high-call utility, function TBD; R3 preserved across call)
+3. `jsr @0x2EEB4` — hardware-ready check: tests bits 0xFF2011.7, 0xFF2017.4, 0xFF2017.3; returns Z=0 if radio can accept a frequency change; branch to error if not
+4. Validate 9 param bytes as ASCII decimal via `jsr @0x19716` × 9
+5. Pack 9 ASCII digits into 5-byte packed-BCD at **0xFF8B8E–0xFF8B92**:
+   - Byte 0: digit[0] & 0xF (lone nibble, always 0 for FT-891 ≤ 54 MHz)
+   - Bytes 1–4: `(digit[N] << 4) | digit[N+1]` (BCD pairs for digits 1–8)
+6. `jsr @0xB370` — apply frequency: transfers 0xFF8B8E staging buffer to primary VFO-A storage (0xFF2372–0xFF2376); returns carry SET on success
+7. `bset #0x7, @0xFF8CD0` then `bclr #0x6..1, @0xFF8CD0` — set VFO-A updated flag (bit 7), clear band/mode bits
+8. `jsr @0xB3A2` — PLL retune
+
+**Read path** (`FA;`, R3L=0):
+1. Reads 4 bytes from 0xFF2372 + 1 byte from 0xFF2376 → staging buffer 0xFF8B8E–0xFF8B92
+2. Optional: if 0xFF2070.7 set and mode nibble=1 (CW), adds 1500 Hz (CW pitch offset) → stores TX frequency to **0xFF236E**
+3. Formats 9 ASCII digits via `jsr @0x1A72C` (shared nibble-to-ASCII formatter)
+4. Response: `FA<9digits>;` = 12 bytes total
+
+**Key RAM locations identified:**
+| Address | Content |
+|---------|---------|
+| 0xFF2372–0xFF2376 | VFO-A frequency (5-byte packed BCD, 9 digits) |
+| 0xFF2376–0xFF237A | VFO-B frequency (5-byte packed BCD; shares byte[0] with VFO-A byte[4] — always 0x00 for FT-891 range) |
+| 0xFF8B8E–0xFF8B92 | Frequency staging / working buffer |
+| 0xFF8CD0 | VFO-A control register: bit 7 = frequency updated flag |
+| 0xFF236E | CW TX frequency (VFO-A + 1500 Hz pitch offset, set during read path) |
+| 0xFF2070 | Mode / state register (bit 7 = CW active, nibble = mode code) |
+
+Functions discovered:
+- `0xB370` — apply packed-BCD frequency from staging buffer to VFO-A storage and PLL
+- `0xB3A2` — trigger PLL retune after frequency change
+- `0x2EEB4` — hardware-ready check (tests 0xFF2011/0xFF2017 port bits)
+- `0x1A72C` — nibble-to-ASCII frequency formatter (shared by FA response and FB response)
+
+Note: 0xFF8CD0 was previously listed as "likely operating frequency (246 accesses)" — the FA analysis shows it is a **VFO control/status register** (bset/bclr on individual bits), not the frequency value itself. Actual VFO-A frequency is at 0xFF2372.
+
+#### MT hidden 38-param write (index 64, handler 0x1B708)
+
+The PDF documents MT as read-only (`MT P1[3];` = 3-digit memory channel recall). The firmware handler
+dispatches on two parameter counts:
+
+- **R3L=3 — read**: jumps to 0x1B5C4 inside the MR handler to read memory channel content back
+- **R3L=38 (0x26) — undocumented write**: combined "write memory channel with name and TX flag"
+
+The 38-byte write format packs three separate operations into one command:
+```
+MT <ch[3]> <MW-data[25]> <tx-flag[1]> <name[12]>;
+      └──────────────────── 38 params total ────────────────────┘
+```
+- **params[0-2]** (3 bytes): memory channel number — decoded by `jsr @0x1DDC` (memory init function)
+- **params[3-27]** (25 bytes): memory channel content in MW write format (same 25-byte block accepted by `MW P1[25];`)
+- **param[28]** (1 byte): `'0'` or `'1'` — TX split flag; `'1'` sets bit 7 of 0xFF2076 (TX configuration register)
+- **params[29-38]** (12 bytes): channel name — validated as printable ASCII (0x20–0x7E); stored to 0xFF20BE (12-byte name buffer)
+
+After writing the name, control falls through to the MW handler's core write path at 0x1B788, which
+completes the memory channel data write. In effect, `MT P1[38];` = `MW P1[25];` + name + TX flag in
+a single transaction.
+
+The `jsr @0x1DDC` function initialises internal memory buffers from ROM default tables at 0x1E9E and
+0x1E50 before writes. This function is shared by both MT R3L=38 and MW R3L=25.
+
+**Memory channel name buffer**: 0xFF20BE–0xFF20C9 (12 bytes, printable ASCII)  
+**TX split flag**: 0xFF2076 bit 7
+
+---
+
+#### IS actual write format is 7 params (PDF states 4)
+
+The PDF documents `IS P1[4];` (4-digit IF shift value). The firmware handler at 0x1AADA requires a
+7-byte write format and 1-byte read format:
+
+```
+Read:  IS0;            (R3L=1 — just the VFO-A selector byte '0')
+Write: IS0 <M> <S> <D0><D1><D2><D3>;  (R3L=7)
+          │   │   └─ 4 hex digits (magnitude, 0x0000–0x04B0 = 0–1200 Hz)
+          │   └─ '+' or '-' (sign)
+          └─ '0' or '1' (scope: '0' = RX only, '1' = RX+TX)
+```
+
+Decode path:
+- params[3-6] validated as hex digits via `jsr @0x19716` × 4; packed into a 16-bit value via the
+  standard nibble-pack sequence, then decoded by `jsr @0x27C62` (4-digit BCD decoder)
+- Magnitude clamped to ≤ 0x04B0 (1200 Hz); rounded to nearest 20 Hz step by `divxs.w #0x14, r3` +
+  `mulxs.w #0x14, r3`; stored at a hardware IF shift register
+- param[1] checked as `'0'`/`'1'` (RX/TX scope flag); stored for response
+- param[2] checked as `'+'`/`'-'`; if `'-'`, the magnitude is negated before storage (`not.l er3; inc.l er3`)
+
+Read path formats the stored values back in the same 7-byte order. Response: `IS0<M><S><D4>;` (8 bytes
+total incl. 'IS' prefix, not 7 — there is an extra response byte).
+
+The "P1[4]" in the PDF describes only the magnitude field; it omits the leading VFO selector, scope
+mode, and sign bytes.
+
+---
+
+#### Systematic leading-'0' prefix omission in PDF
+
+Systematic inspection of BC, CN, and IS handlers reveals a recurring pattern: the first parameter byte
+is always the ASCII character `'0'`, rejected with an error (`bne → 0x19358`) if anything else, yet
+the PDF description omits this byte from the parameter count.
+
+| Cmd | Firmware format | PDF format | Hidden byte |
+|-----|----------------|------------|-------------|
+| IS  | `IS0<M><S><D4>;` R3L=7 | `IS P1[4];` | VFO/scope ('0'/'1') and sign stripped from count |
+| BC  | `BC0;` / `BC0<x>;` R3L=1/2 | `BC P1[1];` | leading '0' VFO selector |
+| CN  | `CN0<ch><D3>;` R3L=5 / `CN0<ch>;` R3L=2 | `CN P1[1] P2[3];` | leading '0' |
+
+The `'0'` byte likely selects VFO-A (or the primary/only channel on single-VFO models). On a future
+dual-VFO variant, a value of `'1'` might select VFO-B. For now the firmware rejects any value other
+than `'0'`, so these are effectively mandatory structural bytes.
 
 ### Front Panel Keys and VFO Encoder
 
@@ -220,7 +499,7 @@ VS VX XT ZI SP VE JP ZZ E0 E8
 
 **RF port** @ 0xFF2073 (135 accesses — heavily used): likely RF frontend control (PA bias, band switching, ATT/IPO)
 
-**Most accessed RAM** @ 0xFF8CD0 (246 accesses): likely the current operating frequency (32-bit Hz value)
+**Most accessed RAM** @ 0xFF8CD0 (246 accesses): VFO-A control/status register (bit 7 = frequency updated flag) — see FA handler analysis; not the frequency value itself
 
 ### Audio / DSP
 
@@ -335,12 +614,12 @@ flowchart TD
     ENC(["VFO encoder\nVec 88 IRQ"]) -->|"counter ++"| T5
     PANEL_B(["Panel board\nSSI0 Vecs 220–222"]) <-->|"0x06 key · 0x15 encoder\n0xE0/E1 display · 0xF0 ACK"| T6
     DSP_C(["TMS320C6746 DSP\nEMIF shared SRAM"]) <-->|"mode index → 0x1182DB8C"| T2
-    CATS(["CAT / PC\nSCI3 Vec 106"]) <-->|"RS-232 · 122 cmds"| T7
+    CATS(["CAT / PC\nSCI3 Vec 106"]) <-->|"RS-232 · 121 cmds"| T7
     LCDS(["LCD\nSPI Vecs 152–154"]) -->|"segment data"| T13
     CWDEC(["CW/RTTY dec\nSSI1 Vecs 224–226"]) -->|"0xA0–0xB4"| T9
 
     subgraph FLASH["Key Flash Tables"]
-        FD["CAT dispatch  0x19540  122 handlers\nCAT cmds       0x19598  122 commands\nUser menu      0x138EE  ~200 items\nAlign table    0xE7B8   ~120 params\nCh names       0x1B1C6  P1L–EMG\nCW ID string   0x22FC   DE FT-891 K"]
+        FD["CAT dispatch  0x193B4  121 handlers\nCAT cmds       0x19598  121 commands\nUser menu      0x138EE  ~200 items\nAlign table    0xE7B8   ~120 params\nCh names       0x1B1C6  P1L–EMG\nCW ID string   0x22FC   DE FT-891 K"]
     end
 
     subgraph SRAM["Internal RAM 0xFFB000–0xFFFFFF"]
