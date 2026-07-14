@@ -97,7 +97,7 @@ Mode codes (P6 in IF/MR/OI/MT/MW): `1`=SSB(USB BFO) `2`=SSB(LSB BFO) `3`=CW(USB 
 | 71 | **OI** | Y | Active | — | R | + | — | Same format as IF but for opposite band (VFO-B in split) — See [OI note](#oi-opposite-band-information) |
 | 72 | **OS** | Y | Active | S | R | + | `OS 0 P2;` P2: 0=simplex, 1=plus shift, 2=minus shift | `OS 0 P2;` — Repeater offset direction (FM mode only) |
 | 73 | **PA** | Y | Active | S | R | + | `PA 0 P2;` P2: 0=IPO (no preamp), 1=AMP | `PA 0 P2;` — Preamplifier / IPO |
-| 74 | **PB** | Y | Active | S | R | + | `PB 0 P2;` P2: 0=DVS stop, 1–5=DVS CH 1–5 playback start | `PB 0 P2;` — DVS (digital voice) playback |
+| 74 | **PB** | Y | Active | S | R | + | Read `PB0;` → `PB0<n>;` (n=current channel, 0=stopped). Write `PB0<P2>;` P2: 0=stop, 1–5=DVS CH 1–5. **Undocumented:** P2 1–5 is a per-channel **toggle**, not just start — re-sending the channel that is already playing stops it (see note). | `PB0<P2>;` — DVS (digital voice) playback / per-channel toggle |
 | 75 | **PC** | Y | Active | S | R | + | `PC P1[3];` 005–100 | `PC P1[3];` — TX power level |
 | 76 | **PE** | N | Active | S | R | — | `PE<CA><CB><CC><D4><D5><D6>;` CA∈{'0','2'} (EQ channel), CB∈{'0','1','2'} (band), CC∈{'0','1','2'} (freq/level/bwth), D4D5D6=value (sign+2digits for CC='1') | `PE<CA><CB><CC><sign><v1><v2>;` — Parametric EQ band coefficient read/write (index 76, handler 0x1BF1E). CA selects EQ bank; CB selects band 1–3; CC='0'=freq (0–7/9/18), CC='1'=level (−20 to +10 dB), CC='2'=bandwidth (1–10). Updates calibration RAM 0xFF8DB3–0xFF8DC4 and hardware immediately via SPI (jsr @0x37E2). Not in PDF — factory/service use only. |
 | 77 | **PL** | Y | Active | S | R | + | `PL P1[3];` 000–100 | `PL P1[3];` — Speech processor level |
@@ -301,3 +301,23 @@ does not mention:
 
 The byte is always ASCII '0'; any other value returns error. On dual-VFO hardware '1' might select
 VFO-B, but the FT-891 rejects it, making these bytes mandatory structural prefixes.
+
+### PB — DVS playback is a per-channel toggle (undocumented)
+
+The PDF documents `PB0<P2>;` with P2 = 0 (stop) / 1–5 ("DVS CH 1–5 playback start"). The firmware
+does not merely *start* on 1–5 — it **toggles** that channel:
+
+| Send | State | Result |
+|------|-------|--------|
+| `PB0<n>;` | stopped | play channel *n* |
+| `PB0<n>;` | channel *n* playing | **stop** (undocumented toggle-off) |
+| `PB0<m>;` | channel *n* playing | stop *n*, start *m* (switch) |
+| `PB00;` | any | explicit stop (documented) |
+| `PB0;` | — | read current channel (0xFF2E9C − 6; 0 = stopped) |
+
+Mechanism: the PB write handler (0x1BDBE) clears 0xFF2040.6 at 0x1BE08 before calling the playback
+starter 0x76F6, which therefore routes to the shared front-panel DVS handler **0x2950C**. That handler
+is a toggle keyed on the playback-active flag 0xFF2041.7: if already playing it calls the stop routine
+0x293D0 and, when the requested channel equals the one that was playing, returns without restarting.
+So a single repeated `PB0<n>;` turns that message on and off, exactly like the physical DVS keys. Obeys
+the same readiness gates as front-panel playback (0x76F6 bails while transmitting / in certain modes).

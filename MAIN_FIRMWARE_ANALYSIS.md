@@ -482,6 +482,38 @@ The `'0'` byte likely selects VFO-A (or the primary/only channel on single-VFO m
 dual-VFO variant, a value of `'1'` might select VFO-B. For now the firmware rejects any value other
 than `'0'`, so these are effectively mandatory structural bytes.
 
+---
+
+#### PB (index 74, handler 0x1BDBE) — DVS playback is a per-channel toggle (undocumented)
+
+The PDF documents `PB0<P2>;` as P2 = 0 (stop) / 1–5 ("DVS CH 1–5 playback **start**"). The firmware
+treats 1–5 as a **toggle**, not a start:
+
+| Send | State | Result |
+|------|-------|--------|
+| `PB0<n>;` | stopped | play channel *n* |
+| `PB0<n>;` | channel *n* playing | **stop** (undocumented toggle-off) |
+| `PB0<m>;` | channel *n* playing | stop *n*, start *m* (switch) |
+| `PB00;` | any | explicit stop (documented) |
+| `PB0;` (read, R3L=1) | — | returns current channel = `0xFF2E9C − 6` (`0` = stopped) |
+
+Handler forms: read `R3L=1` (0x1BE3A), write `R3L=2` (0x1BDCA) — no hidden param counts. The write path
+range-checks P2 to `'0'`–`'5'`, then at **0x1BE08** does `bclr #6, @0xFF2040` (clears the "already
+playing" gate that `0x76F6` tests) and calls the playback starter `jsr @0x76F6`. With that flag cleared,
+`0x76F6` falls through to the shared front-panel DVS handler **`jsr @0x2950C`**.
+
+`0x2950C` is the toggle, keyed on playback-active flag `0xFF2041.7`:
+- **not playing** → set `0xFF2E9C = channel+6`, `bset #7/#5 @0xFF2041`, start
+- **playing** → `jsr @0x293D0` (stop: zeroes `0xFF2E9C`, clears all `0xFF2041` flags), then compares the
+  channel that *was* playing (`0xFF2E9C − 6`, captured pre-stop) against the requested one — if equal,
+  `beq 0x29438` returns **without restarting** (stays stopped = toggle off); if different, starts the new
+  channel.
+
+So a single repeated `PB0<n>;` turns that DVS message on and off, mirroring the physical DVS keys. The
+toggle obeys the same readiness gates as front-panel playback (`0x76F6` bails while transmitting or in
+certain modes: checks at 0x7724–0x7756). DVS playback state lives at `0xFF2E9C` (0 = stopped, 6+channel
+while playing) and flags at `0xFF2041`.
+
 ### Front Panel Keys and VFO Encoder
 
 **Main scan function** @ 0x26484 (called in init + main loop task 5):
