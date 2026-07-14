@@ -321,3 +321,12 @@ is a toggle keyed on the playback-active flag 0xFF2041.7: if already playing it 
 0x293D0 and, when the requested channel equals the one that was playing, returns without restarting.
 So a single repeated `PB0<n>;` turns that message on and off, exactly like the physical DVS keys. Obeys
 the same readiness gates as front-panel playback (0x76F6 bails while transmitting / in certain modes).
+
+**CAT PB is on-air (TX) playback — the monitor/test mode is front-panel only.** DVS playback has two
+modes: *real playback* (transmits) and *playback test* ("Checking Your Recording": you hear it, no TX).
+The distinction is the DVS-transmit request bit **0xFF2018.4**, arbitrated with MOX (0xFF2018.6) in the
+transmit-source chain at 0x2E738–0x2E758. The shared start handler 0x2950C sets 0xFF2018.4 (0x29552) in
+voice modes (SSB/AM) and clears it on stop (0x293E4), so CAT `PB` **transmits**. The monitor/test path
+never sets bit 4 and is reachable only from the front-panel REC-SETTING UI — there is no CAT command to
+play a message without keying TX, i.e. no CAT hook for the test-vs-TX toggle. (MOX bit 0xFF2018.6 is
+set/cleared by the MX handler at 0x1BA52.)

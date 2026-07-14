@@ -514,6 +514,35 @@ toggle obeys the same readiness gates as front-panel playback (`0x76F6` bails wh
 certain modes: checks at 0x7724–0x7756). DVS playback state lives at `0xFF2E9C` (0 = stopped, 6+channel
 while playing) and flags at `0xFF2041`.
 
+#### DVS playback: on-air (TX) vs monitor (test), and why CAT can't select monitor
+
+The Advance Manual splits DVS playback into two front-panel operations:
+- **"Checking Your Recording"** — select a channel directly → you *hear* the message, **no TX** (monitor/test)
+- **"Transmitting the Recorded Message"** — select the **"PB"** panel item, then a channel → plays **on-air (TX)**
+
+The transmit-vs-monitor decision is the **DVS-transmit request bit `0xFF2018.4`**. It is one of the TX
+audio sources arbitrated in the transmit-source chain at **0x2E738–0x2E758**:
+
+```
+0x2E738  btst #6, @0xFF2018   ; MOX active?   (0xFF2018.6 = MOX, set/cleared by the MX handler 0x1BA52)
+0x2E744  btst #5, @0xFF2018   ; (another TX source)
+0x2E758  btst #4, @0xFF2018   ; DVS active?   ← DVS-transmit request
+```
+Any of these being set routes to the "TX source active" branch (0x2E7C4) — i.e. `0xFF2018.4` keys the
+transmitter for DVS exactly the way bit 6 does for MOX.
+
+`0xFF2018.4` is **set** by the DVS start/toggle handler `0x2950C` (`bset #4, @0xFF2018` at 0x29552),
+gated by operating mode (SSB/AM — `jsr @0x2957A` → mode check `0x3E9A`, plus the `0x29584` mode
+dispatch), and **cleared** on DVS stop `0x293D0` (`bclr #4, @0xFF2018` at 0x293E4).
+
+**Consequence for CAT:** the CAT `PB` command routes through `0x2950C`, so in a voice mode (SSB/AM) it
+sets `0xFF2018.4` and **transmits on-air** — CAT PB is the *real* (TX) playback. The monitor/test
+playback ("Checking Your Recording") plays audio **without** setting `0xFF2018.4`, and is reached only
+through the front-panel REC-SETTING UI; no CAT command plays a message while leaving bit 4 clear. So the
+**test-vs-TX toggle is front-panel only** — there is no CAT hook for the monitor mode. (The per-channel
+front-panel mode flag `0xFF8D9A`, toggled by the panel, is likewise written only by front-panel/menu
+code — no CAT writer.)
+
 ### Front Panel Keys and VFO Encoder
 
 **Main scan function** @ 0x26484 (called in init + main loop task 5):
