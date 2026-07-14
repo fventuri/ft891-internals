@@ -340,7 +340,30 @@ ADC channels are RF/audio meters; none is the supply voltage).
 - Checks 0xFF2D58 bits 1 and 0 (inhibit flags)
 - Enables IRQs (EXR=0x7F), reads write ptr @0xFF2006
 - Compares with read ptr @0xFF2002
-- If data available: reads next byte from buffer @0xFF200A, dispatches to command handler
+- If data available: reads next length-prefixed message from ring buffer @0xFF200A (wraps at 0xFF219A →
+  0xFF200A) into 0xFF2345, then dispatches on the first byte (message **tag**) at 0x8F1C
+
+**Message tags** (main → panel):
+
+| Tag | Handler | Purpose |
+|-----|---------|---------|
+| 0x20 / 0x40 / 0x42 / 0x43 / 0x72 / 0x74 / 0x76 | 0x90DA / 0x9144 / 0x920E / 0x9102 / 0x9186 / 0x924C / 0x8FF0 | display field / state updates into 0xFF295B |
+| 0x21 | 0x91C4 | (encoder/aux) |
+| 0x71 | 0x8FC0 | secondary state (version etc.) |
+| **0x70** | **0x8F3A** | **full display + spectrum-scope state** (~380 bytes) |
+
+**Spectrum-scope message (tag 0x70).** The 0x70 handler (0x8F3A) scatters the payload into four buffers
+via the block-copy at 0x7E3A: 0xFF295B (182 B, general display), 0xFF28EA (11 B), 0xFF28F5 (2 B), and
+**0xFF2B8F (184 B = scope block)**. Scope block layout: byte 0 = mode (`0xFF8D04 & 3` on the main side);
+bytes 1–14 = marker + three frequency/edge fields; **bytes 15…165 = 151 trace levels** (0x00–0xF9;
+0xFA = blank); tail = `"SPN"`/`"SWP"`/`"LV"` label descriptors.
+
+**Scope renderer (0x43B0).** Reads the mode byte `0xFF2B8F[0]`, then the 151 column levels from
+**0xFF2B9E** (= block offset 15). Each level is scaled to a bar height (piecewise map at 0x4400:
+thresholds 0x32/0x33/0x96, ÷8) and drawn as a vertical bar into the LCD framebuffer at **0xFF259A**
+using the pixel-pattern lookup at **0xACCE** (framebuffer rows at +0xA0 / +0x140 / +0x1E0). Level 0xFA
+renders as blank/baseline. See `MAIN_FIRMWARE_ANALYSIS.md` → "Spectrum Scope" for the producing side
+(sweep engine, ring buffer 0xFF8A59, and the full 0x70 message table).
 
 ### Task 3 — button_encoder_tx_handler (0x932E)
 

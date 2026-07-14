@@ -557,27 +557,78 @@ the receiver across the SPAN, measures the signal level at each point, and sends
 control head over the internal SSI bus for LCD rendering. (This is why audio mutes during a sweep and
 the trace only refreshes every few seconds.)
 
-**Per-point level measurement** — `jsr @0x2B360`: reads the RX signal level (ADC ch4/ch5 metering) and
-**subtracts a per-frequency-bin noise floor** from the 302-entry calibration table at 0xFF8BA2, so the
-displayed trace is flattened across the span. The subtraction (not accumulation) confirms 0xFF8BA2 is
-calibration, not live data.
+#### Sweep engine (main board)
 
-**Noise-floor calibration table @ 0xFF8BA2** — 302 bytes, bin index 0x000A–0x0137:
+A state machine (state var 0xFF8A57; per-state dwell timer 0xFF8A44, seeded by the EX 13-01 START CYCLE
+setting; control flags in 0xFF204D) drives a mechanical sweep of the receiver. On sweep start (0x2A0E0):
+- `0xFF8A55 = 0xBF` — **191 points** to collect this sweep
+- `0xFF8A56 = 0` (ring write index), `0xFF8A58 = 0` (display window index)
+- frequency accumulator `0xFF8A3C` seeded from scope center `0xFF8A38`; per-step advance = `2 ×` the
+  16-bit step `0xFF8A40` (derived from the EX 13-02 SPAN) — see 0x2A160
+
+Per point (0x2A184 → 0x2A200): retune RX to `0xFF8A3C`, read the detector level (**ADC channel 3
+on-demand mirror, 0xFF2434**), store it into the **ring buffer 0xFF8A59[write-index]**, then advance the
+accumulator. Points whose accumulator falls outside the active window store `0x00`. When the 191 points
+are done, `0xFF8A57` returns to idle.
+
+#### Trace buffer and the main→panel SSI message (tag 0x70)
+
+The display shows a **151-sample window** of the 191-sample ring buffer, starting at
+`0xFF8A59 + (0xFF8A58 + 0x14)`. That window is copied into a large periodic **main→panel SSI message,
+tag 0x70** (~381 bytes), assembled in the display buffer at **0xFF2A24** (bulk display fields via
+0x25E90/0x225B0; the scope block via **0x25DAA**) and queued for SSI TX (message pointer 0xFF2482,
+length 0xFF2486 = 0x17D = 381):
+
+| Msg offset | Size | Content | Panel copy dest |
+|-----------:|-----:|---------|-----------------|
+| 0   | 1   | tag `0x70` | — |
+| 1   | 182 | general display (S-meter, freq digits, icons); the S-meter byte-pair here comes from `0x2B360` | 0xFF295B |
+| 183 | 11  | display state | 0xFF28EA |
+| 194 | 2   | display state | 0xFF28F5 |
+| 196 | 184 | **scope block** (main 0xFF2AE8) | 0xFF2B8F |
+
+**Scope block** (184 bytes, built by 0x25DAA):
+
+| Block offset | Size | Content |
+|-------------:|-----:|---------|
+| 0    | 1   | scope mode = `0xFF8D04 & 3` (off / on / type) |
+| 1    | 2   | marker / param (`0x2A4EC`) |
+| 3    | 4   | frequency field `0xFF23A2` |
+| 7    | 4   | frequency field `0xFF23A6` |
+| 11   | 4   | `0xFF8A46` (scope edge/center) |
+| 15   | 151 | **trace levels** — `memcpy` (`0x2A7D6`) of 151 bytes from ring buffer `0xFF8A59 + (0xFF8A58 + 0x14)`; each byte a level, `0xFA` = no-data/blank |
+| 166  | ~18 | on-screen label descriptors: `"SPN"` (span), `"SWP"`, `"LV"` |
+
+#### Panel side (decode + render)
+
+RX handler **0x8E22** reads the length-prefixed message from the SSI ring buffer and dispatches on the
+tag byte (0x8F1C: 0x20 / 0x21 / 0x40 / 0x42 / 0x43 / 0x70 / 0x71 / 0x72 / 0x74 / 0x76). The **0x70
+handler (0x8F3A)** scatters the payload back into 0xFF295B (182) / 0xFF28EA (11) / 0xFF28F5 (2) /
+**0xFF2B8F (184 = scope)**. The **scope renderer (0x43B0)** reads the mode byte `0xFF2B8F[0]`, then the
+**151 column levels from 0xFF2B9E** (= scope block offset 15); each level is scaled to a bar height
+(piecewise map at 0x4400: thresholds 0x32/0x33/0x96, ÷8) and drawn as vertical bars into the LCD
+framebuffer at **0xFF259A** using the pixel-pattern table at **0xACCE** (framebuffer rows at +0xA0 /
++0x140 / +0x1E0). Level `0xFA` renders as blank/baseline.
+
+#### Noise-floor / scope calibration table @ 0xFF8BA2 (302 bytes, index 0x000A–0x0137)
+
 - Loaded from EEPROM at init (0x1648, via `jsr @0x379C`); ROM defaults copied from 0x16F4 (0x16C4)
 - Part of the bulk calibration image (0xFF2ECC region) that `E8` dumps; restored/verified at 0x1DD20
 - Saved back to EEPROM by `SPAWE` (`jsr @0x4F78` → 0x24D4 → `jsr @0x387C`)
 - Accessible over CAT: one entry via `SPw`/`SPr`, all 302 at once via `SPARD` (see SP command above)
+- Used in the meter/scaling path — `0x2B360 → 0x2BA96` reads entry 0; `0xD98A` indexes it. **Correction
+  to an earlier note:** it is *not* subtracted per-point across the 191-sample sweep trace (the trace is
+  raw ring-buffer levels); the exact per-bin role of this 302-entry table is scope/meter calibration but
+  was not tied to a specific sweep bin.
 
-**No live scope data is retrievable over CAT.** All 121 CAT handlers are enumerated; none returns the
-swept trace, and none calls the sweep/measurement path (which lives in the main task region ~0x24xxx/
-0x25xxx, outside the CAT handler range 0x19358–0x1D912). The only scope-related CAT access is to the
-noise-floor **calibration** constants above. The live trace exists only transiently as it is streamed
-main→panel over SSI for display. Capturing it externally would require tapping the main→panel SSI bus
-or a firmware patch adding a scope-data CAT/serial output.
+#### CAT reachability
 
-*Not yet isolated:* the exact address of the sweep state machine and the precise main→panel SSI
-message format that carries each scope point (the calibration side at 0xFF8BA2 is fully mapped; the
-live-trace producer is bounded to the main task region but not pinpointed).
+**Still not retrievable via CAT — now confirmed end-to-end.** The trace lives only in main RAM (ring
+buffer 0xFF8A59, then the 0xFF2A24 SSI message) and flows exclusively main→panel over SSI for display.
+No CAT handler references the ring buffer, the 0xFF2A24 message, or the sweep engine (all in the main
+task region ~0x2A0xx/0x25Dxx, outside the CAT handler range 0x19358–0x1D912). To capture the trace
+externally, tap the SSI **0x70** message (scope block at message offset 196; 151 trace bytes at block
+offset 15, values 0x00–0xF9, 0xFA = blank), or patch the firmware to add a scope-data CAT/serial output.
 
 ### Calibration / Alignment
 
