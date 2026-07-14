@@ -311,6 +311,23 @@ The function `update_field_display` (0x7F28) is the primary LCD rendering entry 
 It reads display descriptors from the circular buffer and calls the font renderer chain:
 `display_render_dispatch() → display_param_load5/6() → [per-font-width renderer]`
 
+#### Supply-voltage measurement (panel-local — not sent to main board)
+
+`read_adc()` (0x8200 → 0x8222 → 0x8240) samples **panel ADC channel 0 (0xFFFF90)** via the convert
+primitive at 0x825E (write ADCSR 0xFFFFA0, start, poll busy bit 7). The reading is running-averaged
+(`(old+new)/2`, 0x8298) into **0xFF2D28**. A separate consumer at 0x94E4 slew-limits it (±4/step,
+clamped) into a smoothed value **0xFF24E8**, and 0x9650 → 0x968E packs that into an LCD display
+descriptor (buffer 0xFF219A, length 0xFF21AE).
+
+This is the **external DC supply voltage** shown briefly on the LCD at power-up. It is measured and
+displayed entirely within the panel MCU and is **never transmitted to the main board** over SSI — the
+panel→main packets carry only key (0x06) and encoder (0x15) events. That is why the input voltage is
+visible only during the panel's own boot, before the main board takes over the display. Consequently
+**no main-board CAT command can return the supply voltage** without a firmware change on both MCUs
+(panel: add it to a panel→main packet; main: receive it and add/repurpose a CAT handler such as an
+`RM` index). See `MAIN_FIRMWARE_ANALYSIS.md` → "ADC Metering" for the main-board side (all six main
+ADC channels are RF/audio meters; none is the supply voltage).
+
 ### Task 2 — inter_board_rx_handler (0x8E22)
 
 ```

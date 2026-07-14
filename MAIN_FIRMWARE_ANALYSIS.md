@@ -268,12 +268,18 @@ Not in the official CAT reference manual. The coefficient RAM at 0xFF8DB3–0xFF
 
 **`SP` (index 115, handler 0x1D214) — Service Parameter / SPI access**  
 Multi-sub-command family, dispatched on the first parameter byte:
-- `SPW<addr16><data16><cksum>;` (6 params) — direct SPI write; two bytes sent via `jsr @0x37E2` (the main SPI driver)
-- `SPR<addr16><cksum>;` (4 params) — direct SPI read via `jsr @0x3762`; returns 2 bytes + checksum
-- `SPAWN<idx16><byte>;` / `SPAWN<idx16>;` — spectrum scope noise-floor calibration table at 0xFF8BA2; 302-entry table indexed 0x000A–0x0137
-- `SPMTR<data>;` — factory TR-switch test; calls 0x2B5DE; 12-byte (0xC) reply
-- `SPN<val16>;` (write) / `SPN;` (read) — noise-reduction register 0xFF8D14 (range 0–0xE2); applied via 0xD5E4
-- `SPAWE/SPAWD/SPAWCL;` — factory write sequences via 0x4F78 / 0x16C4
+First parameter byte (0xFF81CA) selects the sub-command (dispatch at 0x1D214):
+- `SPW<addr16><data16><cksum>;` (`'W'`, 6 params) — direct SPI write; two bytes sent via `jsr @0x37E2` (the main SPI driver)
+- `SPR<addr16><cksum>;` (`'R'`, 4 params) — direct SPI read via `jsr @0x3762`; returns 2 bytes + checksum
+- `SPw<idx16><byte>;` (`'w'`, 0x1D35C) — **write one** spectrum-scope noise-floor calibration entry (table at 0xFF8BA2, indices 0x000A–0x0137 = 302 entries); sets 0xFF2012.7
+- `SPr<idx16>;` (`'r'`, 0x1D3BC) — **read one** scope noise-floor calibration entry; returns `SPr<idx><byte>;`
+- `SPARD<cksum>;` (`'A''R''D'`, 0x1D4DC → 0x1D500, factory mode 0xFF2023.7 required) — **dump all 302** scope calibration bytes in one response (output 0xFF5849, length 0x135 = 309 bytes, running checksum + `;`)
+- `SPAWE<cksum>;` (`'A''W''E'`, 0x1D4A4) — save the scope calibration table to EEPROM (`jsr @0x4F78`); factory mode
+- `SPACL<cksum>;` (`'A''C''L'`, 0x1D556) — scope calibration clear/reset
+- `SPMTR<data>;` (`'M'`) — reads the current meter/S-value via 0x2B5DE (uses the 0x2B5DE configurable-meter path); 12-byte (0xC) reply
+- `SPN<val16>;` (`'N'`, write) / `SPN;` (read) — noise-reduction register 0xFF8D14 (range 0–0xE2); applied via 0xD5E4
+
+Every scope sub-command touches only the noise-floor **calibration** table (0xFF8BA2), not live scope data — see the Spectrum Scope section below.
 
 **`VE` (index 116, handler 0x1D642) — Version query (requires password)**  
 Format: `VE RAH065H;`  
@@ -506,6 +512,72 @@ than `'0'`, so these are effectively mandatory structural bytes.
 **Task 2** @ 0x2A86C: Audio/DSP processing (large function, upper flash)  
 **Task 3** @ 0x1EF38: RX signal processing  
 **Audio inits**: 0x2B1CE (codec), 0x2B05C (audio path), 0x2AB68 (output)
+
+### ADC Metering (and where the supply voltage is NOT)
+
+**Single ADC sampling routine** @ 0x2B24C — the only context that reads the on-chip A/D. The primitive
+at 0x2B32C writes a channel number to ADCSR (0xFFFFA0), starts the conversion, polls the busy bit
+(0xFFFFA0.7), and the caller reads the result high-byte from ADDRn (0xFFFF90 + 2·n). Only **6 channels
+(0–5)** are ever sampled; channels 6/7 are unused. Each result is stored to a RAM mirror at
+0xFF2431–0xFF243C, split by TX/RX state (0xFF2011.7):
+
+| Ch | ADDR | RX mirror | RX use | TX mirror | TX use |
+|----|------|-----------|--------|-----------|--------|
+| 0 | 0xFFFF90 | 0xFF2431 | squelch / S (0x2987C, 0xD6D8) | 0xFF2435 | **PO** power out — `raw×0x91/cal(0xFF8C71)` @ 0x2B8E2 |
+| 1 | 0xFFFF92 | 0xFF2432 | squelch / noise (0x297DA) | 0xFF243C | **forward power** — `raw×g/0x80 → 0xFF2E9E` @ 0x2BA44 |
+| 2 | 0xFFFF94 | 0xFF2433 | meter (0xD6C2) | 0xFF243B | **reflected / SWR** — vs fwd @ 0x2B904 |
+| 3 | 0xFFFF96 | 0xFF2434 (on-demand, averaged → ring buf 0xFF8A59) | slow monitor | 0xFF2438 | **ALC** — segmented scale, cal 0xFF8C81 @ 0x2B806 |
+| 4 | 0xFFFF98 | 0xFF2439 | scope noise floor (0x2BA96) | — | (same) |
+| 5 | 0xFFFF9A | 0xFF243A | **S-meter** → 12-level bargraph @ 0xD174 | — | (same) |
+
+**Every main-CPU ADC channel is an RF/audio meter (PO / FWD / REF-SWR / ALC / scope-noise / S-meter).
+None reads the DC supply voltage.**
+
+**Supply voltage is measured by the control-head (panel) CPU, not the main board.** In the panel
+firmware (`AH065_P_V0101.bin`) the routine at 0x8240 reads panel ADC channel 0 (0xFFFF90), running-
+averages it into 0xFF2D28, then slew-limits it to a smoothed value 0xFF24E8 (0x94E4) and packs it into
+an LCD display descriptor (0x9650 → 0x968E, buffer 0xFF219A). This value is **never transmitted over
+the SSI link to the main board** — the panel renders it locally on the LCD during its own power-up,
+which is why the input voltage is visible only briefly at turn-on (before the main board establishes
+SSI comms and overwrites the display with normal content).
+
+**Consequence for CAT:** there is no main-board register holding the external supply voltage, so no CAT
+command can return it as shipped. The `RM` (Read Meter) handler (0x1C866) bounds-checks its index to
+0–7 but every index maps through the meter dispatch (0x2B504) to one of the processed meters above;
+indices 5–7 return 0 in RX. Exposing supply voltage would require (1) a panel-firmware change to send
+0xFF24E8 to the main board in a panel→main SSI message, and (2) a main-firmware change to receive it
+and add/repurpose a CAT handler (e.g. an unused `RM` index or a dead stub).
+
+### Spectrum Scope (swept-receiver type)
+
+The FT-891 has a **Spectrum Scope** (documented in the Advance Manual, and configured via menu items
+**EX 13-01 SCP START CYCLE** = OFF/3/5/10 s and **EX 13-02 SCP SPAN FREQ** = 37.5/75/150/375/750 kHz).
+It is a **swept-receiver** scope, not an FFT: at the START CYCLE interval the main board briefly retunes
+the receiver across the SPAN, measures the signal level at each point, and sends the trace to the
+control head over the internal SSI bus for LCD rendering. (This is why audio mutes during a sweep and
+the trace only refreshes every few seconds.)
+
+**Per-point level measurement** — `jsr @0x2B360`: reads the RX signal level (ADC ch4/ch5 metering) and
+**subtracts a per-frequency-bin noise floor** from the 302-entry calibration table at 0xFF8BA2, so the
+displayed trace is flattened across the span. The subtraction (not accumulation) confirms 0xFF8BA2 is
+calibration, not live data.
+
+**Noise-floor calibration table @ 0xFF8BA2** — 302 bytes, bin index 0x000A–0x0137:
+- Loaded from EEPROM at init (0x1648, via `jsr @0x379C`); ROM defaults copied from 0x16F4 (0x16C4)
+- Part of the bulk calibration image (0xFF2ECC region) that `E8` dumps; restored/verified at 0x1DD20
+- Saved back to EEPROM by `SPAWE` (`jsr @0x4F78` → 0x24D4 → `jsr @0x387C`)
+- Accessible over CAT: one entry via `SPw`/`SPr`, all 302 at once via `SPARD` (see SP command above)
+
+**No live scope data is retrievable over CAT.** All 121 CAT handlers are enumerated; none returns the
+swept trace, and none calls the sweep/measurement path (which lives in the main task region ~0x24xxx/
+0x25xxx, outside the CAT handler range 0x19358–0x1D912). The only scope-related CAT access is to the
+noise-floor **calibration** constants above. The live trace exists only transiently as it is streamed
+main→panel over SSI for display. Capturing it externally would require tapping the main→panel SSI bus
+or a firmware patch adding a scope-data CAT/serial output.
+
+*Not yet isolated:* the exact address of the sweep state machine and the precise main→panel SSI
+message format that carries each scope point (the calibration side at 0xFF8BA2 is fully mapped; the
+live-trace producer is bounded to the main task region but not pinpointed).
 
 ### Calibration / Alignment
 

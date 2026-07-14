@@ -147,7 +147,7 @@ These six commands are not in the official CAT manual. They appear at the tail o
 
 | # | Code | PDF | FW | S | R | AI | Arguments / Response | Function |
 |---|------|-----|----|---|---|----|----------------------|----------|
-| 115 | **SP** | N | Active | S | R | — | Sub-commands (see below) | Service Parameter — SPI bus access, spectrum scope data, noise calibration |
+| 115 | **SP** | N | Active | S | R | — | Sub-commands (see below) | Service Parameter — SPI bus access, spectrum-scope noise-floor **calibration** (not live scope data), noise-reduction register |
 | 116 | **VE** | N | Active | — | R | — | `VE RAH065H;` → `R M<ver> DSP<dsp> LCD<lcd>;` | Version query (password = `RAH065H`). Returns main, DSP, and LCD firmware versions |
 | 117 | **JP** | N | Active | S | R | — | Read: `JP 0891;` → 15-byte hex response. Write: `JP 0891 <8 hex digits>;` (1's-complement XOR checksum required: pair1 XOR pair2 = 0xFF) | GPIO port access — reads/writes output port registers 0xFF200A–0xFF200B (band decoder / GPIO lines). Password `0891` = FT-891 model number |
 | 118 | **ZZ** | N | Active | S | — | — | `ZZ PE0891 <nn>;` where `nn` = 2 hex digits, 0–7 | Factory mode entry. Password `PE0891`. Writes `nn` to Port 1 Data Register (0xFF2001), then `JMP 0x726` (factory boot code) |
@@ -160,14 +160,17 @@ These six commands are not in the official CAT manual. They appear at the tail o
 
 | Sub-cmd | Format | Direction | Description |
 |---------|--------|-----------|-------------|
-| `W` | `SP W <addr[2]> <data[2]> <cksum>;` (6 params) | Write | Direct SPI write to address via SPI driver (0x37E2). 7-byte checksum validation |
-| `R` | `SP R <addr[2]> <cksum>;` (4 params) | Read | Direct SPI read via 0x3762; returns 2 data bytes + checksum |
-| `AW E` | `SP AWE ...;` | Write | Factory write sequence via 0x4F78 |
-| `AW D` | `SP AWD ...;` | Write | Factory read-back via 0x4F78 |
-| `AW CL` | `SP AWCL ...;` | Write | Factory write sequence via 0x16C4 (display init area) |
-| `AN` | `SP AN <idx[2]> <byte>;` (write) / `SP AN <idx[2]>;` (read) | R/W | Spectrum scope noise-floor calibration table at 0xFF8BA2; 302-entry table, index range 0x000A–0x0137 |
-| `MT R` | `SP MTR <data[5]>;` | Write | Factory TR-switch test; calls 0x2B5DE; 12-byte reply |
-| `N` | `SP N <val[2]>;` (write) / `SP N;` (read) | R/W | Noise register 0xFF8D14, range 0–0xE2 (226); applied via 0xD5E4 |
+| `W` | `SPW<addr[2]><data[2]><cksum>;` (6 params) | Write | Direct SPI **bus** write via SPI driver (0x37E2). Checksum validated |
+| `R` | `SPR<addr[2]><cksum>;` (4 params) | Read | Direct SPI **bus** read via 0x3762; returns 2 data bytes + checksum |
+| `w` | `SPw<idx[2]><byte>;` | Write | Write **one** spectrum-scope noise-floor calibration entry (table 0xFF8BA2, indices 0x000A–0x0137 = 302 entries); handler 0x1D35C, sets 0xFF2012.7 |
+| `r` | `SPr<idx[2]>;` → `SPr<idx><byte>;` | Read | Read **one** scope noise-floor calibration entry; handler 0x1D3BC |
+| `ARD` | `SPARD<cksum>;` | Read | **Dump all 302** scope calibration bytes in one response (309 bytes, output 0xFF5849); handler 0x1D4DC→0x1D500. Requires factory mode (0xFF2023.7) |
+| `AWE` | `SPAWE<cksum>;` | Write | Save the scope calibration table to EEPROM (0x4F78→0x24D4→0x387C); handler 0x1D4A4. Factory mode |
+| `ACL` | `SPACL<cksum>;` | Write | Scope calibration clear/reset; handler 0x1D556. Factory mode |
+| `MTR` | `SPMTR<data[5]>;` | Read | Reads current meter / S-value via 0x2B5DE; 12-byte reply; handler 0x1D43E |
+| `N` | `SPN<val[2]>;` (write) / `SPN;` (read) | R/W | Noise-reduction register 0xFF8D14, range 0–0xE2 (226); applied via 0xD5E4 |
+
+**Note:** every scope sub-command (`w`/`r`/`ARD`/`AWE`/`ACL`) accesses only the **noise-floor calibration** table (0xFF8BA2) — the per-bin constants the firmware *subtracts* to flatten the trace. There is **no CAT command for live spectrum-scope data**; the swept trace is generated on the main board and streamed to the control head over the internal SSI bus for LCD display only. See `MAIN_FIRMWARE_ANALYSIS.md` → "Spectrum Scope".
 
 ---
 
